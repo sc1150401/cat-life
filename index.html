@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>雪球頭部 Mesh Rig V2</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;background:#dbe8ee;color:#403832;overflow:hidden}
+.stage{height:100vh;position:relative;display:grid;place-items:center;background:
+radial-gradient(circle at 50% 36%,#fff 0%,#eef6f8 34%,#d9e7ed 67%,#bfd2dc 100%)}
+.panel{position:absolute;left:16px;top:16px;z-index:80;background:#fffaf5df;border:1px solid #ffffffaa;border-radius:18px;padding:12px 15px;backdrop-filter:blur(10px);box-shadow:0 8px 24px #526a7520}
+.panel b{display:block}
+.small{font-size:12px;color:#746960;margin-top:4px;line-height:1.5}
+#state{font-weight:750;margin-top:6px}
+.rigWrap{position:relative;width:min(78vw,820px);aspect-ratio:3/2;filter:drop-shadow(0 18px 22px #40535d22)}
+#gl,#fur,#detail,#mesh{position:absolute;inset:0;width:100%;height:100%;display:block}
+#gl{z-index:1}
+#fur{z-index:3;pointer-events:none}
+#detail{z-index:4;pointer-events:none}
+#mesh{z-index:7;pointer-events:none}
+.blush{position:absolute;width:12%;height:12%;border-radius:50%;top:57%;opacity:0;pointer-events:none;
+background:radial-gradient(circle,rgba(255,116,143,.48) 0%,rgba(255,148,167,.24) 48%,rgba(255,148,167,0) 74%);
+filter:blur(3px);mix-blend-mode:multiply;transition:opacity .2s}
+#blL{left:30%} #blR{right:30%}
+#hand{position:absolute;display:none;font-size:48px;pointer-events:none;z-index:90;filter:drop-shadow(0 4px 3px #0002)}
+.controls{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);z-index:90;display:flex;gap:8px;flex-wrap:wrap;justify-content:center;width:min(96vw,980px)}
+button{font:inherit;border:1px solid #b9cad2;background:#fff;padding:10px 14px;border-radius:15px;cursor:pointer;box-shadow:0 2px 8px #43576212}
+button.on{background:#d9edf5}
+.tip{position:absolute;bottom:88px;left:50%;transform:translateX(-50%);z-index:85;background:#fff9;padding:8px 12px;border-radius:14px;font-size:12px;color:#6f665f;white-space:nowrap}
+@media(max-width:700px){.rigWrap{width:96vw}.tip{white-space:normal;width:92vw;text-align:center;bottom:124px}}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="panel">
+    <b>🐱 雪球｜頭部 Mesh Rig V2</b>
+    <div class="small">完整 CG 主臉是一張連續材質，沒有再把五官硬貼回去。<br>現在加入「局部毛束物理」與真正覆蓋眼球的眼皮閉合：摸毛會有慣性回彈，眨眼不再只是把眼睛壓扁。</div>
+    <div id="state">待機</div>
+  </div>
+
+  <div class="rigWrap" id="wrap">
+    <canvas id="gl"></canvas>
+    <canvas id="fur"></canvas>
+    <canvas id="detail"></canvas>
+    <canvas id="mesh"></canvas>
+    <div id="blL" class="blush"></div>
+    <div id="blR" class="blush"></div>
+  </div>
+
+  <div id="hand">👉🏻</div>
+  <div class="tip">移動滑鼠：雪球會看你；按住滑鼠慢慢撫摸臉頰／頭頂，外層毛束會被手帶動再回彈。</div>
+  <div class="controls">
+    <button onclick="blinkNow()">😉 眨眼</button>
+    <button id="happyBtn" onclick="toggleHappy()">😸 開心泛紅</button>
+    <button id="meowBtn" onclick="meow()">😺 張嘴喵</button>
+    <button id="windBtn" onclick="toggleWind()">🌬️ 微風</button>
+    <button id="meshBtn" onclick="toggleMesh()">🕸️ 顯示網格</button>
+    <button onclick="resetRig()">↺ 回復</button>
+  </div>
+</div>
+
+<script>
+const IMG_SRC = "snowball.png";
+const wrap = document.getElementById('wrap');
+const glCanvas = document.getElementById('gl');
+const meshCanvas = document.getElementById('mesh');
+const furCanvas = document.getElementById('fur');
+const detailCanvas = document.getElementById('detail');
+const mctx = meshCanvas.getContext('2d');
+const fctx = furCanvas.getContext('2d');
+const dctx = detailCanvas.getContext('2d');
+const stateEl = document.getElementById('state');
+const hand = document.getElementById('hand');
+const blushL = document.getElementById('blL');
+const blushR = document.getElementById('blR');
+
+let mx=-999,my=-999, pointerActive=false, petting=false;
+let lastPX=0,lastPY=0,strokeDX=0,strokeDY=0,strokeSpeed=0;
+let petFields=[];
+let blink=0,nextBlink=130;
+let happy=false,wind=false,meshOn=false;
+let meowAmt=0,meowTimer=0;
+let t=0;
+
+function pointerToUV(clientX,clientY){
+  const r=wrap.getBoundingClientRect();
+  const x=(clientX-r.left)/r.width, y=(clientY-r.top)/r.height;
+  const clipX=x*2-1, clipY=1-y*2;
+  return {u:clipX/1.82+.5, v:.5-clipY/1.22};
+}
+wrap.addEventListener('pointerdown',e=>{
+  petting=true; lastPX=e.clientX; lastPY=e.clientY;
+  try{wrap.setPointerCapture(e.pointerId)}catch(err){}
+});
+wrap.addEventListener('pointerup',()=>{petting=false;strokeDX=strokeDY=strokeSpeed=0});
+wrap.addEventListener('pointercancel',()=>{petting=false});
+wrap.addEventListener('pointermove',e=>{
+  pointerActive=true; mx=e.clientX; my=e.clientY;
+  hand.textContent=petting?'🫳🏻':'👉🏻';
+  hand.style.display='block'; hand.style.left=(e.clientX-18)+'px'; hand.style.top=(e.clientY-18)+'px';
+  if(petting){
+    strokeDX=e.clientX-lastPX; strokeDY=e.clientY-lastPY;
+    strokeSpeed=Math.hypot(strokeDX,strokeDY);
+    const uv=pointerToUV(e.clientX,e.clientY);
+    if(uv.u>.14&&uv.u<.86&&uv.v>.12&&uv.v<.90&&strokeSpeed>0.3){
+      petFields.push({u:uv.u,v:uv.v,dx:strokeDX,dy:strokeDY,life:1});
+      if(petFields.length>14)petFields.shift();
+      disturbFur(e.clientX,e.clientY,strokeDX,strokeDY,strokeSpeed);
+    }
+    lastPX=e.clientX;lastPY=e.clientY;
+  }
+});
+wrap.addEventListener('pointerleave',()=>{pointerActive=false;petting=false;mx=-999;my=-999;hand.style.display='none'});
+
+function blinkNow(){blink=1}
+function toggleHappy(){
+  happy=!happy;
+  document.getElementById('happyBtn').classList.toggle('on',happy);
+  blushL.style.opacity=happy?.72:0; blushR.style.opacity=happy?.72:0;
+}
+function meow(){
+  meowTimer=78;
+  document.getElementById('meowBtn').classList.add('on');
+}
+function toggleWind(){
+  wind=!wind; document.getElementById('windBtn').classList.toggle('on',wind);
+}
+function toggleMesh(){
+  meshOn=!meshOn; document.getElementById('meshBtn').classList.toggle('on',meshOn);
+}
+function resetRig(){
+  happy=false;wind=false;meshOn=false;meowTimer=0;meowAmt=0;
+  ['happyBtn','windBtn','meshBtn','meowBtn'].forEach(id=>document.getElementById(id).classList.remove('on'));
+  blushL.style.opacity=0;blushR.style.opacity=0;
+}
+
+const gl=glCanvas.getContext('webgl',{alpha:true,antialias:true,premultipliedAlpha:true});
+if(!gl) alert('此瀏覽器無法使用 WebGL');
+
+const vs=`
+attribute vec2 aPos;
+attribute vec2 aUV;
+varying vec2 vUV;
+void main() {
+  gl_Position=vec4(aPos,0.0,1.0);
+  vUV=aUV;
+}`;
+const fs=`
+precision mediump float;
+uniform sampler2D uTex;
+varying vec2 vUV;
+void main(){
+  gl_FragColor=texture2D(uTex,vUV);
+}`;
+function shader(type,src){
+  const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog=gl.createProgram();
+gl.attachShader(prog,shader(gl.VERTEX_SHADER,vs));
+gl.attachShader(prog,shader(gl.FRAGMENT_SHADER,fs));
+gl.linkProgram(prog);gl.useProgram(prog);
+
+const aPos=gl.getAttribLocation(prog,'aPos'), aUV=gl.getAttribLocation(prog,'aUV');
+const posBuf=gl.createBuffer(), uvBuf=gl.createBuffer(), idxBuf=gl.createBuffer();
+
+const COLS=42, ROWS=29;
+const uvs=[], indices=[];
+for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+  uvs.push(x/(COLS-1),y/(ROWS-1));
+}
+for(let y=0;y<ROWS-1;y++) for(let x=0;x<COLS-1;x++){
+  const i=y*COLS+x, r=i+1, d=i+COLS, dr=d+1;
+  indices.push(i,d,r, r,d,dr);
+}
+gl.bindBuffer(gl.ARRAY_BUFFER,uvBuf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(uvs),gl.STATIC_DRAW);
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,idxBuf);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(indices),gl.STATIC_DRAW);
+
+function gaussian(u,v,cx,cy,rx,ry){
+  const dx=(u-cx)/rx,dy=(v-cy)/ry; return Math.exp(-(dx*dx+dy*dy)*2.4);
+}
+function rotLocal(u,v,cx,cy,ang,w){
+  const dx=u-cx,dy=v-cy,c=Math.cos(ang),s=Math.sin(ang);
+  return [u+((dx*c-dy*s)-dx)*w,v+((dx*s+dy*c)-dy)*w];
+}
+
+let currentClipPositions=new Float32Array(COLS*ROWS*2);
+function buildPositions(){
+  const rect=wrap.getBoundingClientRect();
+  const px=pointerActive? (mx-rect.left)/rect.width : .5;
+  const py=pointerActive? (my-rect.top)/rect.height : .5;
+  const lookX=Math.max(-1,Math.min(1,(px-.5)*2));
+  const lookY=Math.max(-1,Math.min(1,(py-.52)*2));
+
+  meowAmt += ((meowTimer>0?1:0)-meowAmt)*.16;
+  if(meowTimer>0) meowTimer--;
+  else document.getElementById('meowBtn').classList.remove('on');
+
+  const arr=new Float32Array(COLS*ROWS*2);
+  let k=0;
+  for(let yy=0;yy<ROWS;yy++) for(let xx=0;xx<COLS;xx++){
+    let u=xx/(COLS-1),v=yy/(ROWS-1);
+    let du=0,dv=0;
+    dv += Math.sin(t*2.0)*0.0018;
+    for(const ec of [[.39,.49],[.66,.49]]){
+      const w=gaussian(u,v,ec[0],ec[1],.105,.105);
+      du += lookX*.010*w;
+      dv += lookY*.006*w;
+      dv += (ec[1]-v)*blink*.16*w;
+    }
+    const windA=wind?Math.sin(t*5.2)*.055:0;
+    let wl=gaussian(u,v,.275,.20,.16,.22), wr=gaussian(u,v,.735,.20,.16,.22);
+    let p=rotLocal(u+du,v+dv,.31,.29,(-.035+lookX*.025+windA),wl);
+    du=p[0]-u;dv=p[1]-v;
+    p=rotLocal(u+du,v+dv,.69,.29,(.035+lookX*.025-windA*.75),wr);
+    du=p[0]-u;dv=p[1]-v;
+    if(happy){
+      const cl=gaussian(u,v,.36,.66,.17,.17), cr=gaussian(u,v,.64,.66,.17,.17);
+      du += (-.010*cl + .010*cr);
+      dv += .004*(cl+cr);
+    }
+    const mw=gaussian(u,v,.51,.70,.15,.13);
+    if(v>.675) dv += meowAmt*.026*mw*(v-.675)/.15;
+    if(v<.70 && v>.62) dv -= meowAmt*.006*mw;
+    if(wind){
+      const sideL=gaussian(u,v,.22,.60,.20,.24), sideR=gaussian(u,v,.80,.60,.20,.24);
+      du += (Math.sin(t*6.0)*.006*sideL + Math.sin(t*6.0+.7)*.006*sideR);
+    }
+    for(const f of petFields){
+      const w=gaussian(u,v,f.u,f.v,.10,.105)*f.life;
+      du += (f.dx/Math.max(1,rect.width))*.30*w;
+      dv += (f.dy/Math.max(1,rect.height))*.26*w;
+    }
+    u+=du;v+=dv;
+    const xClip=(u-.5)*1.82;
+    const yClip=(.5-v)*1.22;
+    arr[k++]=xClip;arr[k++]=yClip;
+  }
+  currentClipPositions=arr;
+  return arr;
+}
+
+const furHairs=[];
+function uvToPx(u,v,r){
+  const clipX=(u-.5)*1.82, clipY=(.5-v)*1.22;
+  return {x:(clipX*.5+.5)*r.width, y:(-clipY*.5+.5)*r.height};
+}
+function addFurArc(cx,cy,rx,ry,a0,a1,count,len,colorA,colorB){
+  for(let i=0;i<count;i++){
+    const q=i/Math.max(1,count-1), a=a0+(a1-a0)*q;
+    const u=cx+Math.cos(a)*rx, v=cy+Math.sin(a)*ry;
+    const outward=Math.atan2(Math.sin(a)*ry,Math.cos(a)*rx);
+    furHairs.push({u,v,base:outward,len:len*(.72+Math.random()*.55),
+      off:0,vel:0,phase:Math.random()*6.28,
+      color:Math.random()<.55?colorA:colorB});
+  }
+}
+addFurArc(.50,.48,.345,.345,Math.PI*.96,Math.PI*2.04,92,6.2,'rgba(255,255,251,.72)','rgba(185,195,192,.56)');
+addFurArc(.25,.23,.105,.19,Math.PI*.72,Math.PI*1.75,30,6.8,'rgba(246,246,240,.72)','rgba(155,166,163,.54)');
+addFurArc(.75,.23,.105,.19,Math.PI*1.25,Math.PI*2.28,30,6.8,'rgba(246,246,240,.72)','rgba(155,166,163,.54)');
+addFurArc(.50,.68,.26,.20,.12,Math.PI-.12,52,7.5,'rgba(255,255,252,.78)','rgba(205,211,208,.58)');
+
+function disturbFur(clientX,clientY,dx,dy,speed){
+  const r=wrap.getBoundingClientRect(), px=clientX-r.left,py=clientY-r.top;
+  const strokeAng=Math.atan2(dy,dx);
+  for(const h of furHairs){
+    const p=uvToPx(h.u,h.v,r), d=Math.hypot(p.x-px,p.y-py);
+    if(d<88){
+      const fall=(1-d/88);
+      const wanted=Math.atan2(Math.sin(strokeAng-h.base),Math.cos(strokeAng-h.base));
+      h.vel += wanted*.055*fall*Math.min(2.2,.35+speed/8);
+    }
+  }
+}
+function drawFur(){
+  const r=wrap.getBoundingClientRect(), dpr=Math.min(2,devicePixelRatio||1);
+  if(furCanvas.width!==Math.round(r.width*dpr)||furCanvas.height!==Math.round(r.height*dpr)){
+    furCanvas.width=Math.round(r.width*dpr);furCanvas.height=Math.round(r.height*dpr);
+    fctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  fctx.clearRect(0,0,r.width,r.height);
+  for(const h of furHairs){
+    const breeze=wind?Math.sin(t*5.1+h.phase)*.0022:0;
+    h.vel += (-h.off*.13 - h.vel*.19) + breeze;
+    h.off += h.vel;
+    h.off=Math.max(-.55,Math.min(.55,h.off));
+    const p=uvToPx(h.u,h.v,r), ang=h.base+h.off;
+    const ex=p.x+Math.cos(ang)*h.len, ey=p.y+Math.sin(ang)*h.len;
+    const mx2=p.x+Math.cos(ang-h.off*.28)*h.len*.55;
+    const my2=p.y+Math.sin(ang-h.off*.28)*h.len*.55;
+    fctx.beginPath();fctx.moveTo(p.x,p.y);fctx.quadraticCurveTo(mx2,my2,ex,ey);
+    fctx.strokeStyle=h.color;fctx.lineWidth=.75;fctx.lineCap='round';fctx.stroke();
+  }
+}
+function drawNaturalBlink(){
+  const r=wrap.getBoundingClientRect(), dpr=Math.min(2,devicePixelRatio||1);
+  if(detailCanvas.width!==Math.round(r.width*dpr)||detailCanvas.height!==Math.round(r.height*dpr)){
+    detailCanvas.width=Math.round(r.width*dpr);detailCanvas.height=Math.round(r.height*dpr);
+    dctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  dctx.clearRect(0,0,r.width,r.height);
+  if(blink<.025 || !image.complete)return;
+  const x0=.045*r.width, y0=.195*r.height, rw=.91*r.width, rh=.61*r.height;
+  const eyes=[[.39,.49],[.66,.49]];
+  for(const [cx,cy] of eyes){
+    const px=x0+cx*rw, py=y0+cy*rh;
+    const rx=.073*rw, ry=.058*rh;
+    dctx.save();
+    dctx.beginPath();dctx.ellipse(px,py,rx,ry,0,0,Math.PI*2);dctx.clip();
+    const topH=2*ry*Math.min(.78,blink*.80);
+    const sx=(cx-.075)*image.width;
+    const sw=.15*image.width;
+    const sy=Math.max(0,(cy-.125)*image.height);
+    const sh=.068*image.height;
+    dctx.drawImage(image,sx,sy,sw,sh,px-rx,py-ry,2*rx,topH);
+    const lowH=2*ry*Math.min(.24,blink*.24);
+    const sy2=Math.min(image.height-sh,(cy+.055)*image.height);
+    dctx.drawImage(image,sx,sy2,sw,sh,px-rx,py+ry-lowH,2*rx,lowH);
+    if(blink>.72){
+      dctx.beginPath();
+      dctx.moveTo(px-rx*.72,py+ry*.02);
+      dctx.quadraticCurveTo(px,py+ry*.19,px+rx*.72,py+ry*.02);
+      dctx.strokeStyle=`rgba(72,68,62,${(.36*(blink-.72)/.28).toFixed(3)})`;
+      dctx.lineWidth=1.1;dctx.stroke();
+    }
+    dctx.restore();
+  }
+}
+
+function drawMesh(){
+  const r=wrap.getBoundingClientRect(), dpr=Math.min(2,devicePixelRatio||1);
+  if(meshCanvas.width!==Math.round(r.width*dpr)||meshCanvas.height!==Math.round(r.height*dpr)){
+    meshCanvas.width=Math.round(r.width*dpr);meshCanvas.height=Math.round(r.height*dpr);
+    mctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  mctx.clearRect(0,0,r.width,r.height);
+  if(!meshOn)return;
+  mctx.strokeStyle='rgba(0,116,170,.22)';mctx.lineWidth=.65;
+  function pt(i){
+    const x=currentClipPositions[i*2], y=currentClipPositions[i*2+1];
+    return [(x*.5+.5)*r.width,(-y*.5+.5)*r.height];
+  }
+  for(let y=0;y<ROWS;y++){
+    mctx.beginPath();
+    for(let x=0;x<COLS;x++){
+      const p=pt(y*COLS+x); if(x===0)mctx.moveTo(...p);else mctx.lineTo(...p);
+    }mctx.stroke();
+  }
+  for(let x=0;x<COLS;x++){
+    mctx.beginPath();
+    for(let y=0;y<ROWS;y++){
+      const p=pt(y*COLS+x); if(y===0)mctx.moveTo(...p);else mctx.lineTo(...p);
+    }mctx.stroke();
+  }
+}
+
+const tex=gl.createTexture();
+const image=new Image();
+image.onload=()=>{
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL,true);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,image);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  requestAnimationFrame(loop);
+};
+image.src=IMG_SRC;
+
+function resize(){
+  const r=wrap.getBoundingClientRect(), dpr=Math.min(2,devicePixelRatio||1);
+  glCanvas.width=Math.round(r.width*dpr);glCanvas.height=Math.round(r.height*dpr);
+  gl.viewport(0,0,glCanvas.width,glCanvas.height);
+  [furCanvas,detailCanvas,meshCanvas].forEach(c=>{c.width=Math.round(r.width*dpr);c.height=Math.round(r.height*dpr)});
+  fctx.setTransform(dpr,0,0,dpr,0,0);dctx.setTransform(dpr,0,0,dpr,0,0);mctx.setTransform(dpr,0,0,dpr,0,0);
+}
+addEventListener('resize',resize);resize();
+
+function updateState(){
+  if(meowTimer>0||meowAmt>.08) stateEl.textContent='張嘴喵喵中 😺';
+  else if(happy&&wind) stateEl.textContent='開心泛紅，耳毛被風吹動 🩶🌬️';
+  else if(happy) stateEl.textContent='開心，臉頰微微放鬆泛紅 😸';
+  else if(wind) stateEl.textContent='耳朵與臉側毛感受到微風 🌬️';
+  else if(petting) stateEl.textContent='正在被慢慢撫摸，毛髮會順著手移動再回彈 🫳🏻';
+  else if(pointerActive) stateEl.textContent='正在看你的手 👀';
+  else stateEl.textContent='待機';
+}
+
+function loop(){
+  t+=.016;
+  if(--nextBlink<0){blink=1;nextBlink=110+Math.random()*190}
+  blink=Math.max(0,blink-.085);
+  petFields.forEach(f=>f.life*=.91);
+  petFields=petFields.filter(f=>f.life>.035);
+  const pos=buildPositions();
+  gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER,posBuf);gl.bufferData(gl.ARRAY_BUFFER,pos,gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(aPos);gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);
+  gl.bindBuffer(gl.ARRAY_BUFFER,uvBuf);gl.enableVertexAttribArray(aUV);gl.vertexAttribPointer(aUV,2,gl.FLOAT,false,0,0);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,idxBuf);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.drawElements(gl.TRIANGLES,indices.length,gl.UNSIGNED_SHORT,0);
+  drawFur();
+  drawNaturalBlink();
+  drawMesh();updateState();
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
